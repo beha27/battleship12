@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Морской Бой 10x10 (PvP & PvE)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        .cell { width: 36px; height: 36px; border: 1px solid #334155; }
+        @media (max-width: 640px) {
+            .cell { width: 28px; height: 28px; }
+        }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen flex flex-col items-center justify-center p-4">
+    <div class="max-w-4xl w-full bg-slate-800 p-6 rounded-2xl shadow-xl border border-slate-700">
+        <h1 class="text-3xl font-bold text-center text-cyan-400 mb-2">⚔️ Морской Бой 10×10</h1>
+        <p class="text-center text-slate-400 mb-6" id="status-text">Выберите режим игры</p>
+
+        <!-- Выбор режима -->
+        <div id="mode-selection" class="flex flex-col sm:flex-row gap-4 justify-center mb-6">
+            <button onclick="selectMode('pve')" class="bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-3 px-6 rounded-xl transition">🤖 Играть с Ботом</button>
+            <button onclick="showPvpMenu()" class="bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 px-6 rounded-xl transition">👥 PvP с Другом (Разные устройства)</button>
+        </div>
+
+        <!-- Меню PvP по сети -->
+        <div id="pvp-menu" class="hidden flex-col items-center gap-4 bg-slate-900 p-4 rounded-xl mb-6">
+            <div class="text-sm text-slate-300">Ваш ID комнаты: <span id="my-peer-id" class="font-mono bg-slate-800 text-cyan-400 px-2 py-1 rounded">Генерация...</span></div>
+            <div class="flex gap-2 w-full max-w-sm">
+                <input type="text" id="join-peer-id" placeholder="Вставьте ID друга" class="bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-700 w-full font-mono text-sm">
+                <button onclick="connectToFriend()" class="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-lg font-bold">Войти</button>
+            </div>
+        </div>
+
+        <!-- Управление расстановкой -->
+        <div id="setup-controls" class="hidden flex justify-center gap-3 mb-4">
+            <button onclick="toggleRotate()" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm">Поворот: <span id="orient-label">Горизонтально</span></button>
+            <button onclick="autoPlace()" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm">Авто-расстановка</button>
+            <button onclick="startGame()" id="btn-start" class="bg-emerald-600 hover:bg-emerald-500 px-6 py-2 rounded-lg font-bold hidden">Начать бой!</button>
+        </div>
+
+        <!-- Игровые поля -->
+        <div id="game-boards" class="hidden flex-col md:flex-row gap-8 justify-center items-center">
+            <div>
+                <h3 class="text-center font-bold text-cyan-400 mb-2">Ваш флот</h3>
+                <div id="my-board" class="grid grid-cols-10 gap-0 bg-slate-950 p-2 rounded-lg border border-slate-800"></div>
+            </div>
+            <div>
+                <h3 class="text-center font-bold text-rose-400 mb-2">Флот соперника</h3>
+                <div id="enemy-board" class="grid grid-cols-10 gap-0 bg-slate-950 p-2 rounded-lg border border-slate-800"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let gameMode = null;
+        let peer = null;
+        let conn = null;
+        let isMyTurn = false;
+
+        // Sound Synthesis (Web Audio API)
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function playSound(freq, type='sine', duration=0.15) {
+            try {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = type;
+                osc.frequency.value = freq;
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start();
+                gain.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + duration);
+                osc.stop(audioCtx.currentTime + duration);
+            } catch(e){}
+        }
+
+        function showPvpMenu() {
+            document.getElementById('pvp-menu').classList.remove('hidden');
+            document.getElementById('pvp-menu').classList.add('flex');
+            initPeer();
+        }
+
+        function initPeer() {
+            if (peer) return;
+            peer = new Peer();
+            peer.on('open', (id) => {
+                document.getElementById('my-peer-id').innerText = id;
+            });
+            peer.on('connection', (c) => {
+                conn = c;
+                setupNetwork();
+                selectMode('pvp', false);
+            });
+        }
+
+        function connectToFriend() {
+            const friendId = document.getElementById('join-peer-id').value.trim();
+            if (!friendId) return alert('Введите ID!');
+            conn = peer.connect(friendId);
+            setupNetwork();
+            selectMode('pvp', true);
+        }
+
+        function setupNetwork() {
+            conn.on('data', (data) => {
+                if (data.type === 'START') {
+                    document.getElementById('status-text').innerText = isMyTurn ? 'Ваш ход!' : 'Ход соперника';
+                } else if (data.type === 'SHOT') {
+                    handleEnemyShot(data.x, data.y);
+                } else if (data.type === 'RESULT') {
+                    applyShotResult(data.x, data.y, data.hit);
+                }
+            });
+        }
+
+        function selectMode(mode, first=true) {
+            gameMode = mode;
+            isMyTurn = first;
+            document.getElementById('mode-selection').classList.add('hidden');
+            document.getElementById('pvp-menu').classList.add('hidden');
+            document.getElementById('setup-controls').classList.remove('hidden');
+            document.getElementById('game-boards').classList.remove('hidden');
+            document.getElementById('game-boards').classList.add('flex');
+            document.getElementById('status-text').innerText = 'Расставьте свои корабли';
+            initBoards();
+        }
+
+        function initBoards() {
+            const myBoard = document.getElementById('my-board');
+            const enemyBoard = document.getElementById('enemy-board');
+            myBoard.innerHTML = '';
+            enemyBoard.innerHTML = '';
+            for (let i = 0; i < 100; i++) {
+                const cell1 = document.createElement('div');
+                cell1.className = 'cell bg-slate-900 flex items-center justify-center cursor-pointer rounded-sm';
+                cell1.dataset.idx = i;
+                myBoard.appendChild(cell1);
+
+                const cell2 = document.createElement('div');
+                cell2.className = 'cell bg-slate-900 flex items-center justify-center cursor-pointer rounded-sm';
+                cell2.dataset.idx = i;
+                cell2.onclick = () => makeShot(i);
+                enemyBoard.appendChild(cell2);
+            }
+        }
+
+        function autoPlace() {
+            playSound(440);
+            document.getElementById('btn-start').classList.remove('hidden');
+            document.getElementById('status-text').innerText = 'Флот готов к бою!';
+        }
+
+        function startGame() {
+            document.getElementById('setup-controls').classList.add('hidden');
+            if (gameMode === 'pvp' && conn) {
+                conn.send({ type: 'START' });
+            }
+            document.getElementById('status-text').innerText = isMyTurn ? 'Ваш ход!' : 'Ход соперника';
+        }
+
+        function makeShot(idx) {
+            if (!isMyTurn) return;
+            playSound(600, 'square', 0.1);
+            if (gameMode === 'pve') {
+                setTimeout(() => {
+                    playSound(800, 'triangle', 0.2);
+                    document.getElementById('status-text').innerText = 'Попадание! (Пример)';
+                }, 300);
+            }
+        }
+
+        function toggleRotate() {
+            const lbl = document.getElementById('orient-label');
+            lbl.innerText = lbl.innerText === 'Горизонтально' ? 'Вертикально' : 'Горизонтально';
+        }
+    </script>
+</body>
+</html>
